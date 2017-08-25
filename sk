@@ -1,0 +1,121 @@
+#!/bin/bash
+
+# symptom killer
+#
+# keep an eye on things and fix them
+# sometimes at boot time, or also other times services die
+# check if dhclient does not get answers (take down interface, take it up).
+# happens on switch power outages with mab/802.1x
+#
+# COMMENTS ALLOWED
+# COMMAND SHOULD RETURN 0:COMMAND SHOULD FIX COMMAND NOT RETURNING 0
+#
+# future features (maybe)
+# -d n daemon mode, run every n seconds
+# -l log to screen
+# -f only show failures
+
+# disable colors if not on terminal
+if [ -t 1 ] ; then
+    # terminal
+    GREEN="\033[1;32m"
+    RED="\033[1;31m"
+    RESET="\033[0m"
+else
+    # not a terminal
+    GREEN=""
+    RED=""
+    RESET=""
+fi
+
+# process parameters
+case $@ in
+    -h|--help)
+	echo syntax: $(basename "$0") "-h | --install-crontab n"
+	echo
+	echo "-h                    show this help"
+	echo "--install-crontab n   install a cronjob for sk to run every n (1..30) minutes"
+	echo
+	exit 0
+    ;;
+    --install-crontab*)
+	CRONTAB="/etc/cron.d/sk"
+	echo "*/$2 * * * *	root	/usr/sbin/sk >/dev/null 2>&1" > $CRONTAB
+	echo "Installed crontab to"
+	ls -la $CRONTAB
+	echo "Contents"
+	cat $CRONTAB
+	echo
+	exit 0
+    ;;
+esac
+
+# if no system conf file found, try a user conf file
+CONFIG=/etc/$(basename "$0").conf
+if test ! -f "$CONFIG"; then
+    echo "$CONFIG" not found.
+
+    CONFIG=$HOME/.$(basename "$0")rc
+    if test ! -f "$CONFIG"; then
+       echo "$CONFIG" not found.
+       exit 1
+    fi
+fi
+
+# check if called binaries are available (logger from bsdutils)
+for a in date logger printf; do
+    which $a >/dev/null
+    if [ ! $? -eq 0 ]; then
+	echo $a not found
+	exit 1
+    fi
+done
+
+# lockfile to disable running more than once at a time
+LOCKFILE=/var/run/$(basename "$0").pid
+
+# clean up in interactive mode on ctrl-c
+trap ctrl_c INT
+
+function ctrl_c() {
+    echo -e "\rCleaning up..."
+    if [ -f "$LOCKFILE" ]; then
+        rm -rf "$LOCKFILE"
+    fi
+    exit 0
+}
+
+# do not run if already running
+if [ -f "$LOCKFILE" ]; then
+    echo "ALREADY RUNNING pid $(cat "$LOCKFILE")"
+    exit 1
+else
+    echo "$$" > "$LOCKFILE"
+fi
+
+checks=$(grep -v ^# "$CONFIG" |grep -cv ^$)
+start=$(date +%s.%N)
+
+echo "$checks checks found."
+
+grep -v "^#" "$CONFIG" |grep -v "^$" | while read line; do
+    #echo $line
+    check=$(echo "$line" | sed s,:.*,,)
+    fix=$(echo "$line" | sed s,.*:,,)
+    echo CHECKING FOR "$check"
+    eval "$check"
+    if [ $? = 0 ]; then
+	echo -e "${GREEN}SUCCESS.${RESET}"
+    else
+	echo -e "${RED}FAILURE.${RESET} TRYING TO FIX WITH $fix"
+	eval "$fix"
+	# LOG?
+	logger -p daemon.info --id=$$ "$fix"
+    fi
+    echo
+done
+end=$(date +%s.%N)
+
+rm -f $LOCKFILE
+printf "TIME %1.2fs\n" "$(echo "$end"-"$start"|bc -l)"
+exit 0
